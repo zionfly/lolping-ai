@@ -1,0 +1,625 @@
+#!/usr/bin/env bash
+# lolping-ai: grab what's on screen, ask Claude Code / Codex (on the dev box or locally), put the answer back.
+# Runs on macOS with the stock bash 3.2; no Homebrew tools needed.
+set -euo pipefail
+shopt -u patsub_replacement 2>/dev/null || true
+
+ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+CONFIG="${LPA_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/lolping-ai/config.sh}"
+STATE="${XDG_STATE_HOME:-$HOME/.local/state}/lolping-ai"
+
+# Defaults; config.sh overrides them.
+LPA_ASK_AGENT=claude       # the question-mark panel: claude | codex
+LPA_CODEX_MODEL=''         # panel with codex: model to pass with -m; empty uses codex's own default
+LPA_BACKEND=local          # background actions (note, reply…): local | ssh
+LPA_HOST=''                # ssh: host or ~/.ssh/config alias of a dev box with claude / codex logged in
+LPA_AGENT=claude           # background actions: claude | codex
+LPA_NOTES_DIR='~/notes'    # on whichever machine runs the agent
+LPA_SEARCH_DIR='~'         # working directory for the "search" action
+LPA_SCREENSHOT=1           # 0: send text only
+LPA_SHOT_MAX=1600          # longest side of the screenshot, in pixels
+LPA_TIMEOUT=240            # seconds
+LPA_CLAUDE_ARGS=''         # extra flags, e.g. '--model sonnet'
+LPA_CODEX_ARGS=''
+LPA_CLAUDE_CONFIG_DIR="$HOME/.config/lolping-ai/claude"   # the ask panel's own Claude login (see: lolping-ai login)
+LPA_LOCAL_NOTES_DIR="$HOME/notes"   # claude / codex actions: the desktop app's working folder on this Mac
+DRY_RUN=0
+SAVED=0
+AT=''        # x,y in global screen points: where a lolPing ping landed
+
+[ -f "$CONFIG" ] && . "$CONFIG"
+mkdir -p "$STATE"
+# pbcopy/pbpaste and ${#var} need a UTF-8 locale; Raycast and launchd don't set one.
+export LANG="${LANG:-en_US.UTF-8}" LC_CTYPE="${LC_CTYPE:-en_US.UTF-8}"
+export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+
+ACTIONS="note reply explain search todo"
+
+die() { notify "lolPing AI 出错" "$1"; echo "lolping-ai: $1" >&2; exit 1; }
+
+# Strings go to AppleScript as argv, never spliced into the script.
+notify() {
+  osascript -e 'on run argv' -e 'display notification (item 2 of argv) with title (item 1 of argv)' -e 'end run' \
+    "$1" "$2" >/dev/null 2>&1 || true
+}
+
+label_of() {
+  case "$1" in
+    note) echo '📝 记笔记' ;; reply) echo '💬 起草回复' ;; explain) echo '❓ 解释' ;;
+    search) echo '🔍 查代码' ;; todo) echo '✅ 记待办' ;;
+    claude) echo '🟠 问 Claude' ;; claude-app) echo '🟠 在 Claude 桌面版里问' ;; codex) echo '⚫ 在 Codex 里问' ;; stop) echo '⏹ 停止' ;; *) echo "$1" ;;
+  esac
+}
+
+# Only plain paths reach the remote shell; "~" is left for it to expand.
+check_dir() {
+  case "$1" in *[!~A-Za-z0-9_./-]*|'') die "目录只能包含字母、数字和 ~ _ . / -：$1" ;; esac
+}
+
+ssh_opts=(-o BatchMode=yes -o ConnectTimeout=8 -o ServerAliveInterval=15
+  -o ControlMaster=auto -o "ControlPath=$HOME/.ssh/lpa-%C" -o ControlPersist=10m)
+rsh() { ssh "${ssh_opts[@]}" "$LPA_HOST" "$@"; }
+
+# perl's alarm survives exec, so this kills the agent (and its ssh) after LPA_TIMEOUT.
+with_timeout() { perl -e 'alarm shift; exec @ARGV or die "exec: $!"' "$LPA_TIMEOUT" "$@"; }
+
+# ---------- context ----------
+
+APP='' WINDOW='' SELECTION='' SHOT='' SPOT='' PAGE_URL=''
+CTX="$STATE/context"
+
+# The hotkey app captures before its menu takes focus, then runs the picked action on the saved context.
+save_context() {
+  mkdir -p "$CTX"
+  printf %s "$APP" > "$CTX/app"; printf %s "$WINDOW" > "$CTX/window"
+  printf %s "$SELECTION" > "$CTX/selection"; printf %s "$SHOT" > "$CTX/shot"
+  printf %s "$SPOT" > "$CTX/spot"; printf %s "$PAGE_URL" > "$CTX/url"
+  date +%s > "$CTX/time"
+}
+
+load_context() {
+  local t
+  t=$(cat "$CTX/time" 2>/dev/null || echo 0)
+  [ $(( $(date +%s) - t )) -le 300 ] || die '保存的上下文已过期，请重新唤起'
+  APP=$(cat "$CTX/app"); WINDOW=$(cat "$CTX/window")
+  SELECTION=$(cat "$CTX/selection"); SHOT=$(cat "$CTX/shot"); SPOT=$(cat "$CTX/spot" 2>/dev/null || true)
+  PAGE_URL=$(cat "$CTX/url" 2>/dev/null || true)
+}
+
+# The ping or hotkey's modifiers may still be down; a simulated ⌘C would then arrive as ⌥⌘C.
+wait_modifiers_up() {
+  osascript -l JavaScript -e 'ObjC.import("AppKit"); for (var i = 0; i < 75 && ($.NSEvent.modifierFlags & 0x1E0000); i++) delay(0.02);' \
+    >/dev/null 2>&1 || true
+}
+
+# The window under a ping: topmost normal window at x,y that isn't lolPing's own. Prints pid, app, title, x,y,w,h
+# on separate lines. Window titles need Screen Recording; without it the title line is empty.
+window_at() {
+  osascript -l JavaScript - "$1" "$2" <<'JXA' 2>/dev/null
+ObjC.import('AppKit'); ObjC.import('CoreGraphics');
+function run(a) {
+  var x = +a[0], y = +a[1];
+  var skip = ['lolPing', 'LolpingAsk', 'LolpingAI', 'Window Server', 'Dock'];
+  var list = ObjC.deepUnwrap(ObjC.castRefToObject($.CGWindowListCopyWindowInfo(1 | 16, 0))) || [];
+  for (var i = 0; i < list.length; i++) {
+    var w = list[i], b = w.kCGWindowBounds;
+    if (w.kCGWindowLayer !== 0 || skip.indexOf(w.kCGWindowOwnerName) >= 0 || /^lolping/i.test(w.kCGWindowOwnerName) || !b || b.Width < 80 || b.Height < 60) continue;
+    if (/watermark/i.test(w.kCGWindowName || '')) continue; // Lark/Feishu lays a watermark window over its real one
+    if (x >= b.X && x < b.X + b.Width && y >= b.Y && y < b.Y + b.Height) {
+      return [w.kCGWindowOwnerPID, w.kCGWindowOwnerName, w.kCGWindowName || '', [b.X, b.Y, b.Width, b.Height].join(',')].join('\n');
+    }
+  }
+  return '';
+}
+JXA
+}
+
+capture() {
+  wait_modifiers_up
+  local under='' under_pid='' under_bounds=''
+  if [ -n "$AT" ]; then
+    under=$(window_at "${AT%,*}" "${AT#*,}")
+    if [ -n "$under" ]; then
+      under_pid=$(printf '%s\n' "$under" | sed -n 1p)
+      under_bounds=$(printf '%s\n' "$under" | sed -n 4p)
+      # The ping marks this window: bring its app forward so ⌘C copies from it.
+      osascript -l JavaScript -e "ObjC.import('AppKit'); var a = \$.NSRunningApplication.runningApplicationWithProcessIdentifier($under_pid); if (a && !a.active) { a.activateWithOptions(2); delay(0.25); }" \
+        >/dev/null 2>&1 || true
+    fi
+  fi
+  APP=$(osascript -e 'tell application "System Events" to get name of first application process whose frontmost is true' 2>/dev/null) \
+    || die '读不到前台应用：请在 系统设置 → 隐私与安全性 → 辅助功能 里允许当前终端或 Raycast'
+  WINDOW=$(osascript -e 'tell application "System Events" to tell (first application process whose frontmost is true) to get name of front window' 2>/dev/null || true)
+  if [ -n "$under" ]; then
+    APP=$(printf '%s\n' "$under" | sed -n 2p)
+    # The app is in front now, so its own front window title is better than overlay names like a watermark layer.
+    case "$WINDOW" in ''|*[Ww]atermark*) WINDOW=$(printf '%s\n' "$under" | sed -n 3p) ;; esac
+  fi
+  # A browser also gives its page address (the first time, macOS asks to allow controlling it).
+  case "$APP" in
+    'Google Chrome'|'Microsoft Edge'|'Brave Browser'|Arc|Chromium)
+      PAGE_URL=$(osascript -e "tell application \"$APP\" to get URL of active tab of front window" 2>/dev/null || true) ;;
+    Safari) PAGE_URL=$(osascript -e 'tell application "Safari" to get URL of front document' 2>/dev/null || true) ;;
+  esac
+
+  # Selected text: copy it, read it, then put the old clipboard text back.
+  local old marker i
+  old=$(pbpaste 2>/dev/null || true)
+  marker="__lolping_ai_$$_$RANDOM"
+  printf %s "$marker" | pbcopy
+  osascript -e 'tell application "System Events" to keystroke "c" using command down' >/dev/null 2>&1 || true
+  for i in 1 2 3 4 5 6 7 8; do
+    sleep 0.1
+    [ "$(pbpaste 2>/dev/null)" != "$marker" ] && break
+  done
+  SELECTION=$(pbpaste 2>/dev/null || true)
+  [ "$SELECTION" = "$marker" ] && SELECTION=''
+  printf %s "$old" | pbcopy
+
+  [ "$LPA_SCREENSHOT" = 1 ] || return 0
+  SHOT="$STATE/shot-$(date +%Y%m%d-%H%M%S)-$$.png"
+  # The front window's bounds; if they can't be read, the whole main display.
+  local bounds rx ry rw rh px py
+  bounds=$(osascript -e 'tell application "System Events" to tell (first application process whose frontmost is true)
+    set {x, y} to position of front window
+    set {w, h} to size of front window
+    return (x as text) & "," & (y as text) & "," & (w as text) & "," & (h as text)
+  end tell' 2>/dev/null || true)
+  [ -n "$under_bounds" ] && bounds="$under_bounds"
+  if [ -n "$AT" ]; then
+    px=${AT%,*}; py=${AT#*,}
+    IFS=, read -r rx ry rw rh <<< "${bounds:-0,0,0,0}"
+    # A ping outside the front window: frame the spot itself instead.
+    if [ -z "$bounds" ] || [ "$px" -lt "$rx" ] || [ "$py" -lt "$ry" ] || [ "$px" -ge $((rx + rw)) ] || [ "$py" -ge $((ry + rh)) ]; then
+      rw=1400; rh=900; rx=$((px - rw / 2)); ry=$((py - rh / 2))
+      [ "$rx" -lt 0 ] && rx=0; [ "$ry" -lt 0 ] && ry=0
+      bounds="$rx,$ry,$rw,$rh"
+    fi
+  fi
+  if [ -n "$bounds" ]; then
+    screencapture -x -R "$bounds" "$SHOT" 2>/dev/null || screencapture -x -m "$SHOT" 2>/dev/null || SHOT=''
+  else
+    screencapture -x -m "$SHOT" 2>/dev/null || SHOT=''
+  fi
+  [ -n "$SHOT" ] && [ -s "$SHOT" ] || { SHOT=''; return 0; }
+  # JPEG keeps a full-window shot to a few hundred KB, which matters over ssh.
+  if sips -Z "$LPA_SHOT_MAX" -s format jpeg -s formatOptions 70 "$SHOT" --out "${SHOT%.png}.jpg" >/dev/null 2>&1; then
+    rm -f "$SHOT"; SHOT="${SHOT%.png}.jpg"
+  fi
+  # Where the ping sits in the final image, in its pixels.
+  if [ -n "$AT" ] && [ -n "$bounds" ]; then
+    local iw
+    iw=$(sips -g pixelWidth "$SHOT" 2>/dev/null | awk '/pixelWidth/ {print $2}')
+    IFS=, read -r rx ry rw rh <<< "$bounds"
+    [ -n "$iw" ] && [ "$rw" -gt 0 ] && SPOT="$(( (px - rx) * iw / rw )),$(( (py - ry) * iw / rw ))"
+  fi
+  find "$STATE" -name 'shot-*' -mtime +1 -delete 2>/dev/null || true
+  return 0
+}
+
+# ---------- prompt ----------
+
+build_prompt() { # action image_path_as_seen_by_agent
+  cat "$ROOT/prompts/$1.md"
+  printf '\n\n---\n## 上下文\n'
+  printf -- '- 时间：%s\n' "$(date '+%Y-%m-%d %H:%M')"
+  printf -- '- 前台应用：%s\n' "$APP"
+  printf -- '- 窗口标题：%s\n' "${WINDOW:-（无）}"
+  if [ -n "$2" ]; then
+    printf -- '- 截图：%s（先用 Read 工具看这张图）\n' "$2"
+  else
+    printf -- '- 截图：无\n'
+  fi
+  if [ -n "$SPOT" ]; then
+    printf -- '- 信号位置：我在截图约 (%s) 像素处放了一个英雄联盟信号（截图里能看到那个图标）。那里就是我想让你看的地方，优先处理它附近的内容。\n' "$SPOT"
+  fi
+  if [ -n "$SELECTION" ]; then
+    printf '\n### 选中的文字\n<selection>\n%s\n</selection>\n' "$SELECTION"
+  else
+    printf '\n### 选中的文字\n（没有选中文字，以截图为准）\n'
+  fi
+}
+
+# ---------- agent ----------
+
+agent_cmd() { # cwd image_dir -> a shell command line that reads the prompt on stdin
+  local cwd="$1" imgdir="$2" img_flag=''
+  case "$LPA_AGENT" in
+    claude)
+      echo "cd $cwd && claude -p --output-format text --allowedTools 'Read,Grep,Glob' --add-dir $imgdir $LPA_CLAUDE_ARGS"
+      ;;
+    codex)
+      [ -n "$3" ] && img_flag="-i $3"
+      local cx=codex
+      [ "$LPA_BACKEND" = local ] && cx=$(codex_bin)
+      echo "cd $cwd && out=\$(mktemp) && $cx exec --skip-git-repo-check --sandbox read-only $img_flag $LPA_CODEX_ARGS -o \"\$out\" - >/dev/null && cat \"\$out\"; rm -f \"\$out\""
+      ;;
+    *) die "LPA_AGENT 只能是 claude 或 codex：$LPA_AGENT" ;;
+  esac
+}
+
+run_agent() { # action -> prints the answer
+  local action="$1" cwd img='' prompt cmd
+  if [ "$action" = search ]; then cwd="$LPA_SEARCH_DIR"; else cwd="$LPA_NOTES_DIR"; fi
+  check_dir "$cwd"; check_dir "$LPA_NOTES_DIR"
+
+  if [ "$LPA_BACKEND" = ssh ]; then
+    local rhome
+    if [ -n "$SHOT" ] && [ "$DRY_RUN" = 0 ]; then
+      rhome=$(rsh 'mkdir -p ~/.cache/lolping-ai && find ~/.cache/lolping-ai -name "shot-*" -mtime +1 -delete; echo $HOME') \
+        || die "连不上 $LPA_HOST"
+      img="$rhome/.cache/lolping-ai/$(basename "$SHOT")"
+      rsh "cat > ~/.cache/lolping-ai/$(basename "$SHOT")" < "$SHOT" || die '截图传不到开发机'
+    elif [ -n "$SHOT" ]; then
+      img="~/.cache/lolping-ai/$(basename "$SHOT")"
+    fi
+    cmd="export PATH=\$HOME/.local/bin:\$PATH; mkdir -p $LPA_NOTES_DIR && $(agent_cmd "$cwd" '$HOME/.cache/lolping-ai' "$img")"
+    prompt=$(build_prompt "$action" "$img")
+    if [ "$DRY_RUN" = 1 ]; then printf '$ ssh %s %q\n\n%s\n' "$LPA_HOST" "$cmd" "$prompt"; return; fi
+    printf '%s' "$prompt" | with_timeout ssh "${ssh_opts[@]}" "$LPA_HOST" "$cmd"
+  else
+    img="$SHOT"
+    cmd="mkdir -p $LPA_NOTES_DIR && $(agent_cmd "$cwd" "$STATE" "$img")"
+    prompt=$(build_prompt "$action" "$img")
+    if [ "$DRY_RUN" = 1 ]; then printf '$ bash -c %q\n\n%s\n' "$cmd" "$prompt"; return; fi
+    printf '%s' "$prompt" | with_timeout bash -c "$cmd"
+  fi
+}
+
+# Appends stdin to a file under LPA_NOTES_DIR on the agent's machine.
+append_note() { # relative_path
+  check_dir "$1"
+  if [ "$LPA_BACKEND" = ssh ]; then
+    rsh "mkdir -p \$(dirname $LPA_NOTES_DIR/$1) && cat >> $LPA_NOTES_DIR/$1"
+  else
+    local f="${LPA_NOTES_DIR/#\~/$HOME}/$1"
+    mkdir -p "$(dirname "$f")" && cat >> "$f"
+  fi
+}
+
+source_line() { printf '%s — %s' "$APP" "${WINDOW:-（无标题）}"; }
+
+save_note() { # answer
+  local day; day=$(date +%Y-%m-%d)
+  printf '\n## %s · %s\n\n%s\n' "$(date +%H:%M)" "$(source_line)" "$1" | append_note "inbox/$day.md"
+  echo "inbox/$day.md"
+}
+
+# ---------- results ----------
+
+show_dialog() { # title text -> prints the button pressed
+  local text="$2"
+  if [ "${#text}" -gt 1800 ]; then text="${text:0:1800}…
+
+（全文在 $STATE/last.md）"; fi
+  osascript -e 'on run argv' \
+    -e 'set r to display dialog (item 2 of argv) with title (item 1 of argv) buttons {"存笔记", "复制", "关闭"} default button "关闭"' \
+    -e 'return button returned of r' -e 'end run' "$1" "$text" 2>/dev/null || echo '关闭'
+}
+
+handle() { # action answer
+  local action="$1" answer="$2" f
+  case "$action" in
+    note)
+      f=$(save_note "$answer") || die '笔记写不进去'
+      notify '📝 已记笔记' "$LPA_NOTES_DIR/${f}：$(printf %s "$answer" | head -n 1)"
+      ;;
+    todo)
+      printf -- '- [ ] %s（%s，%s）\n' "$(printf %s "$answer" | head -n 1)" "$(source_line)" "$(date '+%m-%d %H:%M')" \
+        | append_note todo.md || die '待办写不进去'
+      notify '✅ 已记待办' "$(printf %s "$answer" | head -n 1)"
+      ;;
+    reply)
+      printf %s "$answer" | pbcopy
+      notify '💬 回复草稿已复制' "回到原窗口按 ⌘V 粘贴，确认后再发送"
+      ;;
+    explain|search)
+      case "$(show_dialog "$(label_of "$action") · $(source_line)" "$answer")" in
+        复制) printf %s "$answer" | pbcopy ;;
+        存笔记) f=$(save_note "$answer") && notify '📝 已存笔记' "$LPA_NOTES_DIR/$f" ;;
+      esac
+      ;;
+  esac
+}
+
+# ---------- commands ----------
+
+# ---------- desktop clients ----------
+
+urlencode() { osascript -l JavaScript -e 'function run(a) { return encodeURIComponent(a[0]); }' "$1"; }
+
+# Opens a new Claude Code / Codex session in the desktop app with the context typed into the composer.
+prepare_notes_dir() {
+  mkdir -p "$1/inbox" "$1/attachments"
+  [ -f "$1/CLAUDE.md" ] || cp "$ROOT/devbox/CLAUDE.md" "$1/CLAUDE.md"
+  [ -e "$1/AGENTS.md" ] || ln -s CLAUDE.md "$1/AGENTS.md"
+}
+
+# What the agent gets about the page: source, screenshot copied into the notes folder, ping spot, selection.
+client_context() { # notes_dir max_selection_chars
+  local img='' sel="$SELECTION"
+  if [ -n "$SHOT" ] && [ -s "$SHOT" ]; then
+    img="$1/attachments/$(basename "$SHOT")"
+    [ -f "$img" ] || cp "$SHOT" "$img"
+  fi
+  [ "${#sel}" -gt "$2" ] && sel="${sel:0:$2}…（已截断）"
+  printf '我刚在屏幕上用信号标记了一处内容，先看截图（给的是路径就用 Read 打开），再结合选中的文字回答。\n'
+  printf -- '- 应用：%s；窗口：%s\n' "$APP" "${WINDOW:-（无）}"
+  [ -n "$PAGE_URL" ] && printf -- '- 网址：%s\n' "$PAGE_URL"
+  [ -n "$img" ] && printf -- '- 截图：%s\n' "$img"
+  [ -n "$SPOT" ] && printf -- '- 信号在截图约 (%s) 像素处，那里是我关心的地方（回答时说是哪部分内容，不要提坐标）\n' "$SPOT"
+  [ -n "$sel" ] && printf -- '- 选中的文字：\n<selection>\n%s\n</selection>\n' "$sel"
+  printf '\n用中文回答，简洁直接。如果我说“记下来”，就把要点追加到 inbox/%s.md（带时间和来源）。\n' "$(date +%Y-%m-%d)"
+}
+
+ASK_APP="$HOME/Applications/LolpingAsk.app/Contents/MacOS/LolpingAsk"
+
+# The codex CLI: the one inside Codex.app if installed (it is kept up to date), otherwise the one on PATH.
+codex_bin() {
+  local app=/Applications/Codex.app/Contents/Resources/codex
+  if [ -x "$app" ]; then echo "$app"; else command -v codex || echo codex; fi
+}
+
+# One JXA call for everything that must happen before the panel takes the keyboard: wait for the trigger key to come
+# up, find the window under the ping (skipping lolPing's own and Lark's watermark layer), bring its app forward, copy
+# the selection with ⌘C and put the old clipboard text back. Writes meta.json and selection.txt into the ask dir and
+# prints "pid wid x,y,w,h".
+ASK_JXA='
+ObjC.import("AppKit"); ObjC.import("CoreGraphics");
+ObjC.bindFunction("CGPreflightScreenCaptureAccess", ["bool", []]);
+function save(path, text) { $(text).writeToFileAtomicallyEncodingError(path, true, $.NSUTF8StringEncoding, null); }
+function run(a) {
+  var x = +a[0], y = +a[1], dir = a[2];
+  for (var i = 0; i < 75 && ($.NSEvent.modifierFlags & 0x1E0000); i++) delay(0.02);
+  var list = ObjC.deepUnwrap(ObjC.castRefToObject($.CGWindowListCopyWindowInfo(1 | 16, 0))) || [];
+  var hit = null;
+  for (var i = 0; i < list.length; i++) {
+    var w = list[i], b = w.kCGWindowBounds, owner = w.kCGWindowOwnerName || "";
+    if (w.kCGWindowLayer !== 0 || /^lolping/i.test(owner) || owner === "Dock" || owner === "Window Server") continue;
+    if (!b || b.Width < 80 || b.Height < 60 || /watermark/i.test(w.kCGWindowName || "")) continue;
+    if (x >= b.X && x < b.X + b.Width && y >= b.Y && y < b.Y + b.Height) { hit = w; break; }
+  }
+  var pid = 0, wid = 0, bounds = "", app = "", title = "";
+  if (hit) {
+    pid = hit.kCGWindowOwnerPID; wid = hit.kCGWindowNumber; app = hit.kCGWindowOwnerName; title = hit.kCGWindowName || "";
+    var b = hit.kCGWindowBounds; bounds = [b.X, b.Y, b.Width, b.Height].join(",");
+    var ra = $.NSRunningApplication.runningApplicationWithProcessIdentifier(pid);
+    if (ra && !ra.active) { ra.activateWithOptions(2); delay(0.2); }
+  } else {
+    app = $.NSWorkspace.sharedWorkspace.frontmostApplication.localizedName.js;
+  }
+  var pb = $.NSPasteboard.generalPasteboard, type = $.NSPasteboardTypeString;
+  var old = pb.stringForType(type), cc = pb.changeCount, sel = "";
+  // Press and release Command around the C, like a person does: a flag on the C alone leaves the system
+  // believing Command is still held.
+  var keys = [[55, true, 0x100000], [8, true, 0x100000], [8, false, 0x100000], [55, false, 0]];
+  for (var k = 0; k < keys.length; k++) {
+    var e = $.CGEventCreateKeyboardEvent(null, keys[k][0], keys[k][1]);
+    $.CGEventSetFlags(e, keys[k][2]);
+    $.CGEventPost(0, e);
+  }
+  for (var i = 0; i < 12 && pb.changeCount == cc; i++) delay(0.02);
+  if (pb.changeCount != cc) {
+    var s = pb.stringForType(type); sel = s.isNil() ? "" : s.js;
+    pb.clearContents; if (!old.isNil()) pb.setStringForType(old, type);
+  }
+  save(dir + "/selection.txt", sel);
+  // Without Screen Recording, captures come back as the bare wallpaper, so skip them and say so instead.
+  var screen = $.CGPreflightScreenCaptureAccess();
+  save(dir + "/meta.json", JSON.stringify({ app: app, title: title, selection: sel.length, screen: screen }));
+  return [screen ? 1 : 0, pid, wid, bounds].join(" ");
+}'
+
+# The question-mark ping: the chat panel shows at once and boots claude while this fills in the page context.
+ask_panel() { # notes_dir
+  local dir="$1" x=400 y=300 info pid wid bounds bx by bw bh iw shot
+  [ -x "$ASK_APP" ] || die "没有找到 LolpingAsk，请先运行 $ROOT/mac/build-ask.sh"
+  [ -n "$AT" ] && { x=${AT%,*}; y=${AT#*,}; }
+  ASK_DIR="$STATE/ask/$(date +%Y%m%d-%H%M%S)-$$"
+  local D="$ASK_DIR"
+  mkdir -p "$D"
+  # Whatever fails below, the panel must not wait for "done" forever.
+  trap 'touch "$ASK_DIR/focus" "$ASK_DIR/done"' EXIT
+  perl -MTime::HiRes=time -e 'printf "%.3f", time' > "$D/start"
+  "$ASK_APP" --x "$x" --y "$y" --dir "$D" --cwd "$dir" --script "$0" --claude-config "$LPA_CLAUDE_CONFIG_DIR" \
+    --agent "$LPA_ASK_AGENT" --codex "$(codex_bin)" --codex-model "$LPA_CODEX_MODEL" \
+    >/dev/null 2>>"$STATE/ask.err" &
+  disown
+
+  info=$(osascript -l JavaScript -e "$ASK_JXA" "$x" "$y" "$D" 2>>"$STATE/ask.err" || true)
+  read -r screen pid wid bounds <<< "$info"
+  touch "$D/focus"
+
+  if [ "${screen:-0}" != 1 ]; then
+    : # no Screen Recording for lolPing: no screenshot (see meta.json "screen")
+  elif [ -n "$wid" ] && [ "$wid" != 0 ]; then
+    screencapture -x -o -l "$wid" "$D/shot.png" 2>/dev/null || true
+  fi
+  if [ "${screen:-0}" = 1 ] && [ ! -s "$D/shot.png" ]; then
+    bounds="$((x - 700)),$((y - 450)),1400,900"
+    screencapture -x -R "$bounds" "$D/shot.png" 2>/dev/null || true
+  fi
+  if [ -s "$D/shot.png" ]; then
+    sips -Z "$LPA_SHOT_MAX" -s format jpeg -s formatOptions 70 "$D/shot.png" --out "$D/shot.jpg" >/dev/null 2>&1 || true
+    sips -Z 240 -s format jpeg -s formatOptions 60 "$D/shot.png" --out "$D/thumb.jpg" >/dev/null 2>&1 || true
+    rm -f "$D/shot.png"
+  fi
+
+  APP=$(sed -n 's/.*"app":"\([^"]*\)".*/\1/p' "$D/meta.json" 2>/dev/null || true)
+  WINDOW=$(sed -n 's/.*"title":"\([^"]*\)".*/\1/p' "$D/meta.json" 2>/dev/null || true)
+  SELECTION=$(cat "$D/selection.txt" 2>/dev/null || true)
+  case "$APP" in
+    'Google Chrome'|'Microsoft Edge'|'Brave Browser'|Arc|Chromium)
+      PAGE_URL=$(osascript -e "tell application \"$APP\" to get URL of active tab of front window" 2>/dev/null || true) ;;
+    Safari) PAGE_URL=$(osascript -e 'tell application "Safari" to get URL of front document' 2>/dev/null || true) ;;
+  esac
+  printf %s "$PAGE_URL" > "$D/url"
+
+  SHOT='' SPOT=''
+  if [ -s "$D/shot.jpg" ]; then
+    shot="$dir/attachments/$(basename "$D").jpg"
+    cp "$D/shot.jpg" "$shot" && SHOT="$shot"
+    IFS=, read -r bx by bw bh <<< "$bounds"
+    iw=$(sips -g pixelWidth "$D/shot.jpg" 2>/dev/null | awk '/pixelWidth/ {print $2}')
+    [ -n "$iw" ] && [ "${bw:-0}" -gt 0 ] && SPOT="$(( (x - bx) * iw / bw )),$(( (y - by) * iw / bw ))"
+  fi
+  client_context "$dir" 20000 > "$D/context.tmp" && mv "$D/context.tmp" "$D/context.md"
+  save_context
+  touch "$D/done"
+  find "$STATE/ask" -mindepth 1 -maxdepth 1 -mtime +1 -exec rm -rf {} + 2>/dev/null || true
+}
+
+# claude: a chat panel next to the ping, backed by the local `claude -p`.
+# claude-app / codex: a new session in that desktop app with the context typed in.
+open_client() { # claude|claude-app|codex
+  local app="$1" dir="${LPA_LOCAL_NOTES_DIR/#\~/$HOME}" prompt url ctx
+  prepare_notes_dir "$dir"
+  if [ "$app" = claude ]; then ask_panel "$dir"; return; fi
+  if [ "$SAVED" = 1 ]; then load_context; elif [ -z "${LPA_CAPTURED:-}" ]; then capture; fi
+  # Deep links are capped in length, so the selection is cut shorter here.
+  prompt="$(client_context "$dir" 3000)
+我的问题："
+  if [ "$app" = claude-app ]; then
+    url="claude://code/new?q=$(urlencode "$prompt")&folder=$(urlencode "$dir")"
+  else
+    url="codex://new?prompt=$(urlencode "$prompt")&path=$(urlencode "$dir")"
+  fi
+  if [ "$DRY_RUN" = 1 ]; then printf '%s\n\n%s\n' "$url" "$prompt"; return; fi
+  open "$url" || die "打不开 $app 客户端"
+}
+
+run_action() {
+  local action="$1" answer
+  case " $ACTIONS " in *" $action "*) ;; *) die "未知动作：$action" ;; esac
+  if [ "$SAVED" = 1 ]; then load_context; elif [ -z "${LPA_CAPTURED:-}" ]; then capture; fi
+  if [ "$DRY_RUN" = 1 ]; then run_agent "$action"; return; fi
+
+  echo $$ > "$STATE/running.pid"
+  trap 'rm -f "$STATE/running.pid"' EXIT
+  notify "$(label_of "$action") 思考中…" "$(source_line)"
+  answer=$(run_agent "$action" 2>"$STATE/last.err") || {
+    local code=$?
+    [ "$code" = 142 ] && die "超过 ${LPA_TIMEOUT}s 没有结果，已停止"
+    die "$(tail -n 3 "$STATE/last.err" | tr '\n' ' ')"
+  }
+  [ -n "$answer" ] || die "Agent 没有返回内容（stderr 在 $STATE/last.err）"
+  printf '# %s · %s\n\n%s\n' "$(label_of "$action")" "$(source_line)" "$answer" > "$STATE/last.md"
+  handle "$action" "$answer"
+}
+
+menu() {
+  # Read the context first: the menu itself takes focus.
+  capture; LPA_CAPTURED=1
+  local choice a items=()
+  for a in $ACTIONS stop; do items+=("$(label_of "$a")"); done
+  choice=$(osascript -e 'on run argv' \
+    -e 'set c to choose from list argv with title "lolPing AI" with prompt "对当前窗口做什么？" default items {item 1 of argv}' \
+    -e 'if c is false then return ""' -e 'return item 1 of c' -e 'end run' "${items[@]}" 2>/dev/null || true)
+  [ -n "$choice" ] || exit 0
+  for a in $ACTIONS stop; do
+    if [ "$(label_of "$a")" = "$choice" ]; then
+      if [ "$a" = stop ]; then stop_job; else run_action "$a"; fi
+      return
+    fi
+  done
+}
+
+stop_job() {
+  local pid
+  pid=$(cat "$STATE/running.pid" 2>/dev/null || true)
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    pkill -TERM -P "$pid" 2>/dev/null || true
+    kill -TERM "$pid" 2>/dev/null || true
+    rm -f "$STATE/running.pid"
+    notify '⏹ 已停止' '正在跑的任务已结束'
+  else
+    notify '⏹ 没有正在跑的任务' ''
+  fi
+}
+
+doctor() {
+  local ok=1
+  echo "config:  $CONFIG $([ -f "$CONFIG" ] && echo '(found)' || echo '(missing, using defaults)')"
+  echo "backend: $LPA_BACKEND  agent: $LPA_AGENT  host: $LPA_HOST  notes: $LPA_NOTES_DIR"
+  if osascript -e 'tell application "System Events" to get name of first application process whose frontmost is true' >/dev/null 2>&1; then
+    echo 'ok    辅助功能（读窗口、模拟 ⌘C）'
+  else
+    echo 'FAIL  辅助功能：系统设置 → 隐私与安全性 → 辅助功能，允许运行本脚本的 App（终端 / Raycast）'; ok=0
+  fi
+  echo '      屏幕录制：没开的话截图里只有桌面背景。系统设置 → 隐私与安全性 → 屏幕与系统音频录制'
+  local probe='echo "reply with exactly: pong" | '
+  if [ "$LPA_AGENT" = claude ]; then probe="$probe claude -p"; else probe="$probe codex exec --skip-git-repo-check -"; fi
+  local out
+  [ "$LPA_BACKEND" != ssh ] || [ -n "$LPA_HOST" ] || { echo 'FAIL  LPA_BACKEND=ssh 但没有设置 LPA_HOST'; ok=0; }
+  [ -x "$ASK_APP" ] && echo "ok    问号对话框（${LPA_ASK_AGENT}）" || { echo "FAIL  没有安装 LolpingAsk.app"; ok=0; }
+  if [ "$LPA_BACKEND" = ssh ]; then
+    if rsh true 2>/dev/null; then echo "ok    ssh $LPA_HOST"; else echo "FAIL  ssh ${LPA_HOST}（需要免密登录）"; ok=0; fi
+    out=$(rsh "export PATH=\$HOME/.local/bin:\$PATH; $probe" 2>&1 || true)
+  else
+    out=$(bash -c "$probe" 2>&1 || true)
+  fi
+  if printf %s "$out" | grep -q pong; then
+    echo "ok    $LPA_AGENT 能用"
+  else
+    echo "FAIL  ${LPA_AGENT}：$(printf %s "$out" | tail -n 2 | tr '\n' ' ')"; ok=0
+    [ "$LPA_BACKEND" = ssh ] && echo "      在开发机上运行 claude，再执行 /login"
+  fi
+  [ "$ok" = 1 ]
+}
+
+usage() {
+  cat <<EOF
+用法：lolping-ai [--dry-run] <命令>
+
+  menu       弹出动作菜单（给它绑一个快捷键）
+  note       把当前窗口提炼成笔记，追加到 $LPA_NOTES_DIR/inbox/<日期>.md
+  reply      起草回复，放进剪贴板
+  explain    解释选中的内容或当前窗口
+  search     在 $LPA_SEARCH_DIR 下检索相关代码
+  claude     在信号旁边弹出对话框，用本机 claude 回答，可以追问、复制、记下来
+  claude-app 在 Claude 桌面版新开一个 Claude Code 会话，上下文已填好，接着提问
+  codex      在 Codex 桌面版新开一个会话，同上
+  todo       把选中的内容记成一条待办，追加到 $LPA_NOTES_DIR/todo.md
+  capture    只抓上下文并保存，配合 --saved <动作> 使用（给 LolpingAI.app 用）
+  stop       停止正在跑的任务
+  doctor     检查权限、ssh 和 agent 登录
+  login      给问号对话框单独登录一个 Claude 账号，不影响你平时用的 claude
+  last       打开上一次的结果
+
+--dry-run 只打印要执行的命令和 prompt，不调用 agent。
+--saved   用上一次 capture 保存的上下文，不重新抓。
+--at x,y  信号落点（全局屏幕坐标，单位 pt）。lolPing 发信号时会带上它。
+配置：$CONFIG
+EOF
+}
+
+while :; do
+  case "${1:-}" in
+    --dry-run) DRY_RUN=1; shift ;;
+    --saved) SAVED=1; shift ;;
+    --at)
+      case "${2:-}" in
+        -[0-9]*,*|[0-9]*,*) AT="$2"; shift 2 ;;
+        *) usage; exit 2 ;;
+      esac
+      ;;
+    *) break ;;
+  esac
+done
+case "${1:-}" in
+  menu) menu ;;
+  capture) capture; save_context ;;
+  note|reply|explain|search|todo) run_action "$1" ;;
+  claude|claude-app|codex) open_client "$1" ;;
+  stop) stop_job ;;
+  doctor) doctor ;;
+  login)
+    # A separate config dir keeps this login apart from the one your own `claude` uses.
+    mkdir -p "$LPA_CLAUDE_CONFIG_DIR"
+    echo "给问号对话框登录 Claude 账号（配置目录 ${LPA_CLAUDE_CONFIG_DIR}）。进去后输入 /login，完成后 /exit。"
+    env -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_API_KEY -u ANTHROPIC_BASE_URL CLAUDE_CONFIG_DIR="$LPA_CLAUDE_CONFIG_DIR" claude
+    ;;
+  last) open "$STATE/last.md" ;;
+  -h|--help|help|'') usage ;;
+  *) usage; exit 2 ;;
+esac

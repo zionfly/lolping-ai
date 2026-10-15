@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>lolPing AI Wheel</title>
+<style>
+:root{
+  --bg:#f4f5f7;--panel:#ffffff;--ink:#16181d;--muted:#5f6673;--line:#dfe2e8;
+  --accent:#2e8bff;--note:#35d27a;--reply:#f2b320;--ask:#b26bff;--danger:#ff3b55;
+  --desk:#dfe6ef;--win:#ffffff;--code:#f0f2f5;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#0f1115;--panel:#171a21;--ink:#e8eaee;--muted:#9aa2b1;--line:#2a2f3a;
+    --desk:#1b2029;--win:#222733;--code:#1d212a;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#0f1115;--panel:#171a21;--ink:#e8eaee;--muted:#9aa2b1;--line:#2a2f3a;
+  --desk:#1b2029;--win:#222733;--code:#1d212a;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.55 -apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif}
+header{padding:28px 16px 8px;max-width:1180px;margin:0 auto}
+h1{font-size:22px;margin:0 0 4px}
+h2{font-size:16px;margin:28px 0 10px}
+.sub{color:var(--muted)}
+main{max-width:1180px;margin:0 auto;padding:0 16px 60px}
+.grid{display:grid;grid-template-columns:1fr 340px;gap:16px}
+@media (max-width:900px){.grid{grid-template-columns:1fr}}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px}
+/* fake desktop */
+#desk{position:relative;height:520px;background:var(--desk);border-radius:12px;overflow:hidden;user-select:none;border:1px solid var(--line);cursor:default}
+.win{position:absolute;background:var(--win);border:1px solid var(--line);border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.12);overflow:hidden}
+.win .bar{height:26px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:6px;padding:0 10px;font-size:12px;color:var(--muted)}
+.dot{width:10px;height:10px;border-radius:50%;background:#ff5f57}.dot:nth-child(2){background:#febc2e}.dot:nth-child(3){background:#28c840}
+.win .body{padding:12px;font-size:13px}
+.msg{padding:6px 8px;border-radius:8px;margin-bottom:6px;background:var(--code)}
+.msg b{font-size:12px;color:var(--muted);display:block}
+pre.code{margin:0;font:12px/1.5 ui-monospace,Menlo,monospace;white-space:pre-wrap}
+.hint{position:absolute;left:12px;bottom:10px;font-size:12px;color:var(--muted);background:var(--panel);padding:4px 8px;border-radius:6px;border:1px solid var(--line)}
+/* wheel */
+#wheel{position:absolute;width:260px;height:260px;margin:-130px 0 0 -130px;display:none;pointer-events:none}
+#wheel svg{overflow:visible}
+.slice{fill:rgba(20,24,32,.72);stroke:rgba(255,255,255,.25);stroke-width:1}
+.slice.on{fill:rgba(46,139,255,.85)}
+.slabel{fill:#fff;font-size:12px;text-anchor:middle;dominant-baseline:middle;font-weight:600}
+/* ping + result */
+.ping{position:absolute;width:44px;height:44px;margin:-22px 0 0 -22px;border-radius:50%;border:3px solid var(--c);box-shadow:0 0 18px var(--c);display:grid;place-items:center;font-size:18px;color:#fff;background:rgba(0,0,0,.45);pointer-events:none}
+.ping.busy{animation:pulse 1s infinite}
+@keyframes pulse{50%{transform:scale(1.18)}}
+.result{position:absolute;width:300px;background:var(--panel);border:1px solid var(--line);border-left:4px solid var(--c);border-radius:10px;box-shadow:0 10px 30px rgba(0,0,0,.2);padding:10px 12px;font-size:13px;z-index:5}
+.result h4{margin:0 0 4px;font-size:13px}
+.result .meta{font-size:11px;color:var(--muted);margin-bottom:6px}
+.result .acts{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap}
+button{font:inherit;font-size:12px;border:1px solid var(--line);background:var(--code);color:var(--ink);border-radius:6px;padding:4px 10px;cursor:pointer}
+button.pri{background:var(--accent);border-color:var(--accent);color:#fff}
+/* config */
+label{display:block;font-size:12px;color:var(--muted);margin:10px 0 3px}
+select,input,textarea{width:100%;font:inherit;font-size:13px;padding:6px 8px;border-radius:6px;border:1px solid var(--line);background:var(--bg);color:var(--ink)}
+textarea{font-family:ui-monospace,Menlo,monospace;font-size:12px;min-height:64px}
+#log{font:12px/1.5 ui-monospace,Menlo,monospace;background:var(--code);border-radius:8px;padding:8px;max-height:180px;overflow:auto;white-space:pre-wrap;margin-top:10px}
+table{border-collapse:collapse;width:100%;font-size:13px}
+th,td{border-bottom:1px solid var(--line);text-align:left;padding:7px 8px;vertical-align:top}
+th{color:var(--muted);font-weight:600}
+code{font:12px ui-monospace,Menlo,monospace;background:var(--code);padding:1px 5px;border-radius:4px}
+.flow{display:flex;gap:8px;flex-wrap:wrap;align-items:stretch}
+.flow .step{flex:1 1 150px;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px}
+.flow .step b{display:block;margin-bottom:2px}
+.flow .arrow{align-self:center;color:var(--muted)}
+ol li,ul li{margin:3px 0}
+</style>
+</head>
+<body>
+<header>
+  <h1>lolPing AI Wheel: prototype and plan</h1>
+  <div class="sub">按住 <b>⇧ Shift</b>（下面这个演示里：按住鼠标拖动），在任意窗口上拉出 AI 轮盘，松手后把这一处的上下文交给你开发机上的 Claude Code / Codex，让它做笔记、起草回复或解释内容。</div>
+</header>
+<main>
+<div class="grid">
+  <div>
+    <div id="desk">
+      <div class="win" style="left:24px;top:24px;width:360px;height:250px">
+        <div class="bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span>&nbsp;Lark · #mino-oncall</div>
+        <div class="body">
+          <div class="msg"><b>同事 A</b>线上 /api/page/render 偶发 504，看 trace 是 fornax 下游超时，有人知道最近改过超时配置吗？</div>
+          <div class="msg"><b>同事 B</b>上周 TCC 好像动过 mino.render.timeout</div>
+          <div class="msg"><b>同事 A</b>@你 能帮忙看下吗</div>
+        </div>
+      </div>
+      <div class="win" style="left:410px;top:60px;width:330px;height:230px">
+        <div class="bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span>&nbsp;render_handler.go</div>
+        <div class="body"><pre class="code">ctx, cancel := context.WithTimeout(
+  ctx, cfg.RenderTimeout)
+defer cancel()
+resp, err := fornax.Call(ctx, req)
+if errors.Is(err, context.DeadlineExceeded) {
+  return nil, ErrGatewayTimeout
+}</pre></div>
+      </div>
+      <div class="win" style="left:120px;top:300px;width:420px;height:170px">
+        <div class="bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span>&nbsp;Chrome · 设计评审文档</div>
+        <div class="body">方案二：把渲染改成流式输出，首屏先返回骨架，后续块通过 SSE 推送。风险：老客户端不支持 SSE，需要降级路径。待定：是否需要灰度开关。</div>
+      </div>
+      <div id="wheel"><svg width="260" height="260" viewBox="-130 -130 260 260" id="wsvg"></svg></div>
+      <div class="hint">在任意窗口上按住鼠标拖向一个扇区，再松开</div>
+    </div>
+
+    <h2>它会怎么跑</h2>
+    <div class="flow">
+      <div class="step"><b>1. 手势</b>hook-helper 识别 Shift+拖动，只吞掉这一个手势，其他输入照常透传</div>
+      <div class="arrow">→</div>
+      <div class="step"><b>2. 抓上下文</b>指针附近区域截图、选中文字（剪贴板）、前台 App 和窗口标题</div>
+      <div class="arrow">→</div>
+      <div class="step"><b>3. 派发</b>按动作套模板，调用 <code>claude -p</code> / <code>codex exec</code>，在本机跑或 ssh 到开发机</div>
+      <div class="arrow">→</div>
+      <div class="step"><b>4. 回显</b>原位留一个“思考中”信号，跑完变成结果卡片：复制、粘贴、存笔记、追问</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <b>配置（对应 Settings → AI）</b>
+    <label>Agent</label>
+    <select id="agent"><option value="claude">Claude Code（claude -p）</option><option value="codex">Codex（codex exec）</option></select>
+    <label>在哪里跑</label>
+    <select id="where"><option value="ssh">开发机（ssh）</option><option value="local">本机</option></select>
+    <label>SSH host（来自 ~/.ssh/config）</label>
+    <input id="host" value="devbox">
+    <label>开发机上的工作目录</label>
+    <input id="cwd" value="~/notes">
+    <label>笔记文件</label>
+    <input id="notes" value="~/notes/inbox/{date}.md">
+    <label>命令模板（{prompt} 用 stdin 传入，不进 shell）</label>
+    <textarea id="tpl"></textarea>
+    <div id="log">// 每次派发的命令会显示在这里</div>
+  </div>
+</div>
+
+<h2>轮盘上的动作</h2>
+<table>
+  <tr><th>扇区</th><th>上下文</th><th>做什么</th><th>输出去哪</th></tr>
+  <tr><td>📝 记笔记</td><td>截图 + 选中文字 + 窗口标题</td><td>提炼成 3 到 5 条要点和待办，带来源</td><td>追加到开发机上的 <code>inbox/YYYY-MM-DD.md</code>，卡片显示摘要</td></tr>
+  <tr><td>💬 起草回复</td><td>同上，重点读对话</td><td>按你的口吻起草一条回复</td><td>写进剪贴板，卡片上“粘贴”一键 ⌘V 回原窗口；不会自动发送</td></tr>
+  <tr><td>❓ 解释</td><td>截图 + 选中文字</td><td>解释这段代码、报错或文档</td><td>只显示在卡片里，可以追问</td></tr>
+  <tr><td>🔍 查一下</td><td>同上</td><td>在开发机仓库里 grep 和读代码，找出相关实现</td><td>卡片 + 笔记，带文件路径</td></tr>
+  <tr><td>✅ 记待办</td><td>选中文字</td><td>变成一条待办</td><td>追加到 <code>todo.md</code>（以后可以接飞书任务）</td></tr>
+  <tr><td>⏹ 停止</td><td>无</td><td>取消正在跑的任务</td><td>结束 ssh 进程</td></tr>
+</table>
+
+<h2>方案要点</h2>
+<ul>
+  <li><b>新开一个 AI 轮盘，不改原有的信号和表情。</b>沿用 emote wheel 的做法给 <code>WheelKind</code> 加一个 <code>'ai'</code>，hook-helper 多一个触发键（默认 Shift，可改），这样 Alt 和 Ctrl 轮盘的行为都不变。</li>
+  <li><b>在 main 进程加一个 runner 模块</b>（<code>src/main/agentRunner.ts</code>）：<code>spawn('ssh', [host, 'claude', '-p', ...])</code>，prompt 和图片通过 stdin 或 scp 传过去，不拼 shell 字符串。<code>--output-format stream-json</code> 让卡片能流式显示进度。超时、取消、同时只跑 N 个都放在纯逻辑模块里，方便测试。</li>
+  <li><b>上下文抓取</b>（<code>src/main/contextCapture.ts</code>）：<code>desktopCapturer</code> 截指针所在显示器，裁掉指针周围 1200×800；用 <code>osascript</code> 取前台 App 和窗口标题；选中文字靠模拟 ⌘C，读完再把剪贴板还原。需要 macOS 的“屏幕录制”权限，设置窗口里像辅助功能那样引导用户开启。</li>
+  <li><b>开发机侧的配置</b>：在 <code>~/notes</code> 放一个 <code>CLAUDE.md</code> / <code>AGENTS.md</code>，写明笔记格式、回复口吻和禁区（例如“只起草，不发送，不改仓库”）。Claude 用 <code>--allowedTools "Read,Grep,Glob,Edit(~/notes/**)"</code> 限死能动的范围，Codex 用 <code>--sandbox workspace-write</code>。</li>
+  <li><b>结果卡片</b>挂在 overlay 窗口里。overlay 现在是点击穿透的，只在卡片的矩形区域内打开 <code>setIgnoreMouseEvents(false)</code>，鼠标离开后恢复穿透。</li>
+  <li><b>隐私</b>：截图和文字只发到你自己配的那台开发机，再由它调用 Claude 或 Codex 的 API。设置里写清楚，并且可以把截图关掉，只发文字。</li>
+</ul>
+
+<h2>分阶段</h2>
+<ol>
+  <li><b>P0，一天，不改 lolPing：</b>本地放一个 <code>lolping-ai</code> 脚本，用 macOS 快捷键（Raycast / Hammerspoon）触发，流程是截图 + 剪贴板 → ssh devbox claude -p → 通知加剪贴板。先确认链路、权限和 prompt 好不好用。</li>
+  <li><b>P1，fork lolPing：</b>加 AI 轮盘、runner、结果卡片和 Settings → AI 页，本地 <code>npm run dev</code> 跑起来，打一个自用的 dmg。</li>
+  <li><b>P2：</b>笔记同步回本机（Obsidian 或飞书文档），追问时保留会话（<code>claude -r</code>），起草回复后接飞书直接发送，但每次发送前都要你确认。</li>
+</ol>
+</main>
+
+<script>
+const ACTIONS=[
+  {id:'note',label:'📝 笔记',c:'var(--note)',title:'已记笔记',meta:'→ ~/notes/inbox/2026-10-15.md',
+   body:'• /api/page/render 偶发 504，trace 显示 fornax 下游超时<br>• 怀疑上周 TCC mino.render.timeout 被调小<br>☐ 查 TCC 变更记录，对比 504 出现的时间点'},
+  {id:'reply',label:'💬 回复',c:'var(--reply)',title:'回复草稿（已复制）',meta:'不会自动发送',
+   body:'我看了下：render_handler 用的是 cfg.RenderTimeout，超时后统一返回 504。如果 TCC 上 mino.render.timeout 上周被改小，就能解释这批 504。我去拉一下变更记录，对一下时间点，有结果在这里同步。'},
+  {id:'explain',label:'❓ 解释',c:'var(--accent)',title:'解释',meta:'render_handler.go',
+   body:'用配置的 RenderTimeout 给 fornax 调用设了 deadline。超时后返回 ErrGatewayTimeout，网关层会把它映射成 504。所以 504 的频率直接取决于这个配置值。'},
+  {id:'search',label:'🔍 查一下',c:'var(--ask)',title:'代码检索',meta:'devbox:~/repo/mino_server',
+   body:'RenderTimeout 在 conf/tcc.go:42 读取 mino.render.timeout，默认 3s；gateway/errors.go:88 把 ErrGatewayTimeout 映射成 504。'},
+  {id:'todo',label:'✅ 待办',c:'var(--note)',title:'已加待办',meta:'→ ~/notes/todo.md',body:'☐ 核对 mino.render.timeout 上周的 TCC 变更'},
+  {id:'stop',label:'⏹ 停止',c:'var(--danger)',title:'已取消',meta:'',body:'正在跑的任务已结束。'},
+  {id:'none1',label:'',c:''},{id:'none2',label:'',c:''},
+];
+const N=8,R=120,r=34;
+const svg=document.getElementById('wsvg');
+function arc(i){
+  const a0=(i-0.5)*2*Math.PI/N-Math.PI/2,a1=(i+0.5)*2*Math.PI/N-Math.PI/2;
+  const p=(rad,a)=>[rad*Math.cos(a),rad*Math.sin(a)];
+  const [x0,y0]=p(R,a0),[x1,y1]=p(R,a1),[x2,y2]=p(r,a1),[x3,y3]=p(r,a0);
+  return `M${x0},${y0}A${R},${R} 0 0 1 ${x1},${y1}L${x2},${y2}A${r},${r} 0 0 0 ${x3},${y3}Z`;
+}
+ACTIONS.forEach((a,i)=>{
+  const path=document.createElementNS('http://www.w3.org/2000/svg','path');
+  path.setAttribute('d',arc(i));path.setAttribute('class','slice');path.dataset.i=i;
+  svg.appendChild(path);
+  if(a.label){
+    const am=i*2*Math.PI/N-Math.PI/2,t=document.createElementNS('http://www.w3.org/2000/svg','text');
+    t.setAttribute('x',(R+r)/2*Math.cos(am));t.setAttribute('y',(R+r)/2*Math.sin(am));
+    t.setAttribute('class','slabel');t.textContent=a.label;svg.appendChild(t);
+  }
+});
+const desk=document.getElementById('desk'),wheel=document.getElementById('wheel'),log=document.getElementById('log');
+let origin=null,sel=-1;
+function pick(dx,dy){
+  if(Math.hypot(dx,dy)<r) return -1;
+  let a=Math.atan2(dy,dx)+Math.PI/2; if(a<0)a+=2*Math.PI;
+  const i=Math.round(a/(2*Math.PI/N))%N; return ACTIONS[i].label?i:-1;
+}
+function rel(e){const b=desk.getBoundingClientRect();return {x:e.clientX-b.left,y:e.clientY-b.top};}
+function winAt(p){
+  for(const w of desk.querySelectorAll('.win')){
+    const l=w.offsetLeft,t=w.offsetTop;
+    if(p.x>=l&&p.x<=l+w.offsetWidth&&p.y>=t&&p.y<=t+w.offsetHeight) return w.querySelector('.bar').textContent.trim();
+  }
+  return 'Desktop';
+}
+desk.addEventListener('pointerdown',e=>{
+  if(e.target.closest('.result')) return;
+  origin=rel(e);sel=-1;wheel.style.left=origin.x+'px';wheel.style.top=origin.y+'px';wheel.style.display='block';
+  desk.setPointerCapture(e.pointerId);
+});
+desk.addEventListener('pointermove',e=>{
+  if(!origin) return; const p=rel(e); sel=pick(p.x-origin.x,p.y-origin.y);
+  svg.querySelectorAll('.slice').forEach(s=>s.classList.toggle('on',+s.dataset.i===sel));
+});
+desk.addEventListener('pointerup',()=>{
+  wheel.style.display='none'; if(!origin) return; const o=origin; origin=null;
+  if(sel>=0) dispatch(ACTIONS[sel],o);
+});
+function q(s){return "'"+s.replace(/'/g,"'\\''")+"'";}
+function cmdline(a,src){
+  const agent=document.getElementById('agent').value,where=document.getElementById('where').value;
+  const host=document.getElementById('host').value,cwd=document.getElementById('cwd').value;
+  const base=agent==='claude'
+    ? `claude -p --output-format stream-json --allowedTools "Read,Grep,Glob,Edit(${cwd}/**)"`
+    : `codex exec --sandbox workspace-write -C ${cwd}`;
+  const remote=where==='ssh'?`ssh ${host} 'cd ${cwd} && ${base}'`:`(cd ${cwd} && ${base})`;
+  return `${remote}  < prompt[action=${a.id}, window=${src}, +screenshot.png]`;
+}
+function syncTpl(){document.getElementById('tpl').value=cmdline({id:'{action}'},'{window}');}
+['agent','where','host','cwd'].forEach(id=>document.getElementById(id).addEventListener('input',syncTpl));syncTpl();
+const running=new Set();
+function dispatch(a,p){
+  if(a.id==='stop'){running.forEach(t=>t.cancel());running.clear();log.textContent+=`\n[stop] killed running jobs`;return;}
+  const src=winAt(p);
+  log.textContent+=`\n$ ${cmdline(a,src)}`;log.scrollTop=1e9;
+  const ping=document.createElement('div');ping.className='ping busy';ping.style.setProperty('--c',a.c);
+  ping.style.left=p.x+'px';ping.style.top=p.y+'px';ping.textContent='…';desk.appendChild(ping);
+  const job={};
+  const t=setTimeout(()=>{
+    running.delete(job);ping.classList.remove('busy');ping.textContent=a.label.split(' ')[0];
+    const card=document.createElement('div');card.className='result';card.style.setProperty('--c',a.c);
+    card.style.left=Math.min(p.x+20,desk.clientWidth-310)+'px';card.style.top=Math.min(p.y+10,desk.clientHeight-200)+'px';
+    card.innerHTML=`<h4>${a.title}</h4><div class="meta">${src}${a.meta?' · '+a.meta:''}</div><div>${a.body}</div>
+      <div class="acts">${a.id==='reply'?'<button class="pri">粘贴 ⌘V</button>':''}<button>复制</button><button>存笔记</button><button>追问</button><button data-x>关闭</button></div>`;
+    card.addEventListener('pointerdown',e=>e.stopPropagation());
+    card.querySelector('[data-x]').onclick=()=>{card.remove();ping.remove();};
+    desk.appendChild(card);log.textContent+=`\n  ✓ ${a.id} done (1.8s)`;log.scrollTop=1e9;
+  },1800);
+  job.cancel=()=>{clearTimeout(t);ping.remove();};running.add(job);
+}
+</script>
+</body>
+</html>

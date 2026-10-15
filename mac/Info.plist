@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key><string>com.zionfly.lolping-ai</string>
+  <key>CFBundleName</key><string>LolpingAI</string>
+  <key>CFBundleDisplayName</key><string>lolPing AI</string>
+  <key>CFBundleExecutable</key><string>LolpingAI</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>0.1.0</string>
+  <key>CFBundleVersion</key><string>1</string>
+  <key>LSMinimumSystemVersion</key><string>13.0</string>
+  <key>LSUIElement</key><true/>
+  <key>NSAppleEventsUsageDescription</key><string>读取前台窗口标题，并模拟 ⌘C 取得选中的文字。</string>
+</dict>
+</plist>

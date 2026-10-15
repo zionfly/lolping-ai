@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<style>
+:root {
+  --bg: #faf9f5; --panel: #ffffff; --ink: #1f1e1d; --muted: #73726c; --faint: #a3a29b;
+  --line: #e8e6dc; --bubble: #f0eee6; --accent: #d97757; --accent-ink: #ffffff; --code: #f3f1ea;
+  --serif: "New York", ui-serif, Georgia, "Songti SC", serif;
+  --sans: -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #262624; --panel: #30302e; --ink: #f5f4ef; --muted: #a6a39b; --faint: #75736c;
+    --line: #3d3d3a; --bubble: #3a3a37; --code: #1f1f1d;
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.55 var(--sans); -webkit-font-smoothing: antialiased; }
+body { overflow: hidden; }
+#shell { display: flex; flex-direction: column; max-height: 100vh; }
+
+header { display: flex; align-items: center; gap: 8px; height: 40px; padding: 0 10px 0 14px; flex: none; user-select: none; }
+.spark { color: var(--accent); font-size: 17px; line-height: 1; display: inline-block; }
+.spark.spin { animation: spin 1.6s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.title { font-weight: 600; font-size: 13px; }
+.source { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 1; }
+.icon { width: 26px; height: 26px; border: 0; border-radius: 7px; background: transparent; color: var(--muted); cursor: pointer;
+  display: grid; place-items: center; padding: 0; flex: none; }
+.icon:hover { background: var(--bubble); color: var(--ink); }
+.icon svg { width: 15px; height: 15px; }
+.icon[disabled] { opacity: .35; pointer-events: none; }
+
+#thread { overflow-y: auto; padding: 4px 18px 0; flex: 1 1 auto; min-height: 0; }
+#thread:empty { display: none; }
+.turn { margin: 6px 0 14px; }
+.q { display: flex; justify-content: flex-end; margin-bottom: 10px; }
+.q div { background: var(--bubble); border-radius: 16px; padding: 7px 13px; max-width: 85%; white-space: pre-wrap; word-break: break-word; }
+.a { font: 15px/1.65 var(--serif); word-break: break-word; }
+.a p { margin: 0 0 .7em; } .a p:last-child { margin-bottom: 0; }
+.a h1, .a h2, .a h3 { font: 600 15px/1.5 var(--sans); margin: .9em 0 .4em; }
+.a ul, .a ol { margin: 0 0 .7em; padding-left: 1.4em; } .a li { margin: .2em 0; }
+.a code { font: 12.5px ui-monospace, Menlo, monospace; background: var(--code); padding: 1px 5px; border-radius: 5px; }
+.a pre { background: var(--code); border-radius: 10px; padding: 10px 12px; overflow-x: auto; margin: 0 0 .7em; }
+.a pre code { background: none; padding: 0; font-size: 12px; line-height: 1.5; }
+.a a { color: var(--accent); }
+.a blockquote { margin: 0 0 .7em; padding-left: 10px; border-left: 3px solid var(--line); color: var(--muted); }
+.status { display: flex; align-items: center; gap: 6px; color: var(--muted); font: 13px var(--sans); margin-top: 4px; }
+.err { color: #c0453a; font: 13px var(--sans); }
+
+#composer { margin: 8px 12px 12px; background: var(--panel); border: 1px solid var(--line); border-radius: 18px;
+  box-shadow: 0 1px 2px rgba(0,0,0,.04), 0 4px 14px rgba(0,0,0,.04); padding: 8px 8px 8px 12px; flex: none; }
+#chips { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 6px; }
+#chips:empty { display: none; }
+.chip { display: flex; align-items: center; gap: 6px; border: 1px solid var(--line); border-radius: 10px; padding: 3px 8px 3px 3px;
+  font-size: 12px; color: var(--muted); background: var(--bg); max-width: 100%; }
+.chip.text { padding-left: 8px; }
+.chip.warn { padding-left: 8px; color: #9a5b13; background: #fdf3e1; border-color: #f1d9ad; cursor: pointer; }
+@media (prefers-color-scheme: dark) { .chip.warn { color: #f0c27a; background: #3a2f1e; border-color: #5c4826; } }
+.chip img { width: 34px; height: 26px; object-fit: cover; border-radius: 6px; display: block; }
+.chip .ph { width: 34px; height: 26px; border-radius: 6px; background: var(--line); animation: pulse 1.2s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: .45; } }
+.chip span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.row { display: flex; align-items: flex-end; gap: 8px; }
+textarea { flex: 1; border: 0; outline: 0; resize: none; background: transparent; color: var(--ink); font: 14.5px/1.5 var(--sans);
+  max-height: 140px; padding: 5px 0; margin: 0; }
+textarea::placeholder { color: var(--faint); }
+#send { width: 30px; height: 30px; border-radius: 9px; border: 0; background: var(--accent); color: var(--accent-ink); cursor: pointer;
+  display: grid; place-items: center; flex: none; transition: opacity .15s; }
+#send[disabled] { opacity: .35; cursor: default; }
+#send svg { width: 15px; height: 15px; }
+.foot { display: flex; justify-content: space-between; color: var(--faint); font-size: 11px; padding: 6px 2px 0; }
+#toast { position: fixed; left: 50%; bottom: 74px; transform: translateX(-50%); background: var(--ink); color: var(--bg); font-size: 12px;
+  padding: 5px 11px; border-radius: 8px; opacity: 0; transition: opacity .2s; pointer-events: none; white-space: nowrap; }
+#toast.on { opacity: .92; }
+</style>
+</head>
+<body>
+<div id="shell">
+  <header>
+    <span class="spark" id="spark">✻</span>
+    <span class="title" id="title">问 Claude</span>
+    <span class="source" id="source">正在读取页面…</span>
+    <button class="icon" id="copy" title="复制回答" disabled><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="5" y="5" width="8.5" height="8.5" rx="2"/><path d="M3 10.5V3.5A1.5 1.5 0 0 1 4.5 2h7"/></svg></button>
+    <button class="icon" id="note" title="记下来（追加到今天的笔记）" disabled><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M4 2.5h8v11l-4-2.6-4 2.6z"/></svg></button>
+    <button class="icon" id="open" title="在 Claude 桌面版继续"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M9 2.5h4.5V7M13.5 2.5 7.5 8.5M12 9.5v3a1 1 0 0 1-1 1H3.5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1h3"/></svg></button>
+    <button class="icon" id="close" title="关闭（Esc）"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 4l8 8M12 4l-8 8"/></svg></button>
+  </header>
+  <div id="thread"></div>
+  <div id="composer">
+    <div id="chips"><div class="chip"><div class="ph"></div><span>正在截取页面…</span></div></div>
+    <div class="row">
+      <textarea id="input" rows="1" placeholder="问问这个页面…"></textarea>
+      <button id="send" title="发送（回车）" disabled><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 13V3M3.5 7.5 8 3l4.5 4.5"/></svg></button>
+    </div>
+    <div class="foot"><span id="hint">回车发送 · Shift+回车换行 · Esc 关闭</span><span id="engine">本机 Claude Code</span></div>
+  </div>
+</div>
+<div id="toast"></div>
+<script>
+const $ = (id) => document.getElementById(id);
+const post = (m) => window.webkit && window.webkit.messageHandlers.app.postMessage(m);
+const STOP = '<svg viewBox="0 0 16 16"><rect x="4" y="4" width="8" height="8" rx="1.5" fill="currentColor"/></svg>';
+const SEND = $('send').innerHTML;
+let running = false, current = null, lastAnswer = '';
+
+function esc(s) { return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+function inline(s) {
+  return s
+    .replace(/`([^`]+)`/g, (_, c) => `<code>${c}</code>`)
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>')
+    .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2">$1</a>');
+}
+/** Enough markdown for answers: fences, headings, lists, quotes, paragraphs. */
+function md(src) {
+  const out = []; const lines = esc(src).split('\n'); let i = 0;
+  while (i < lines.length) {
+    const l = lines[i];
+    if (/^```/.test(l)) {
+      const buf = []; i++;
+      while (i < lines.length && !/^```/.test(lines[i])) buf.push(lines[i++]);
+      i++; out.push(`<pre><code>${buf.join('\n')}</code></pre>`); continue;
+    }
+    let m;
+    if ((m = l.match(/^(#{1,4})\s+(.*)/))) { out.push(`<h3>${inline(m[2])}</h3>`); i++; continue; }
+    if (/^\s*([-*+]|\d+[.)])\s+/.test(l)) {
+      const ordered = /^\s*\d/.test(l); const items = [];
+      while (i < lines.length && /^\s*([-*+]|\d+[.)])\s+/.test(lines[i])) items.push(lines[i++].replace(/^\s*([-*+]|\d+[.)])\s+/, ''));
+      out.push(`<${ordered ? 'ol' : 'ul'}>${items.map((t) => `<li>${inline(t)}</li>`).join('')}</${ordered ? 'ol' : 'ul'}>`); continue;
+    }
+    if (/^&gt;\s?/.test(l)) {
+      const buf = []; while (i < lines.length && /^&gt;\s?/.test(lines[i])) buf.push(lines[i++].replace(/^&gt;\s?/, ''));
+      out.push(`<blockquote>${inline(buf.join('<br>'))}</blockquote>`); continue;
+    }
+    if (!l.trim()) { i++; continue; }
+    const buf = []; while (i < lines.length && lines[i].trim() && !/^(```|#{1,4}\s|\s*([-*+]|\d+[.)])\s|&gt;)/.test(lines[i])) buf.push(lines[i++]);
+    out.push(`<p>${inline(buf.join('<br>'))}</p>`);
+  }
+  return out.join('');
+}
+
+/** The height the panel needs: measured from the parts, since the shell itself is capped at the window height. */
+function reportHeight() {
+  const t = $('thread');
+  const threadH = t.children.length ? t.scrollHeight : 0;
+  const h = document.querySelector('header').offsetHeight + threadH + $('composer').offsetHeight + 20;
+  if (h !== reportHeight.last) { reportHeight.last = h; post({ type: 'height', h }); }
+}
+new ResizeObserver(reportHeight).observe($('composer'));
+new MutationObserver(() => requestAnimationFrame(reportHeight)).observe($('thread'), { childList: true, subtree: true, characterData: true });
+function scrollDown() { const t = $('thread'); t.scrollTop = t.scrollHeight; }
+function toast(text) { const t = $('toast'); t.textContent = text; t.classList.add('on'); clearTimeout(toast.t); toast.t = setTimeout(() => t.classList.remove('on'), 1600); }
+function syncSend() {
+  const b = $('send');
+  if (running) { b.innerHTML = STOP; b.disabled = false; b.title = '停止'; }
+  else { b.innerHTML = SEND; b.disabled = !$('input').value.trim(); b.title = '发送（回车）'; }
+}
+function grow() { const t = $('input'); t.style.height = 'auto'; t.style.height = Math.min(t.scrollHeight, 140) + 'px'; }
+
+function send() {
+  if (running) { post({ type: 'stop' }); return; }
+  const text = $('input').value.trim(); if (!text) return;
+  $('input').value = ''; grow();
+  const turn = document.createElement('div'); turn.className = 'turn';
+  turn.innerHTML = `<div class="q"><div></div></div><div class="a"></div><div class="status"><span class="spark spin">${$('spark').textContent}</span><span>思考中…</span></div>`;
+  turn.querySelector('.q div').textContent = text;
+  $('thread').appendChild(turn);
+  current = { el: turn, text: '' }; running = true; $('spark').classList.add('spin');
+  syncSend(); scrollDown(); post({ type: 'send', text });
+}
+
+$('input').addEventListener('input', () => { grow(); syncSend(); });
+$('input').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); }
+});
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') post({ type: 'close' }); });
+$('send').onclick = send;
+$('copy').onclick = () => { post({ type: 'copy', text: lastAnswer }); toast('已复制回答'); };
+$('note').onclick = () => post({ type: 'note' });
+$('open').onclick = () => post({ type: 'openApp' });
+$('close').onclick = () => post({ type: 'close' });
+document.addEventListener('click', (e) => { const a = e.target.closest('a'); if (a) { e.preventDefault(); post({ type: 'link', href: a.href }); } });
+
+/** Called from Swift. */
+window.app = {
+  source(text) { $('source').textContent = text; },
+  agent(name) {
+    if (name !== 'codex') return;
+    $('title').textContent = '问 Codex'; $('engine').textContent = '本机 Codex';
+    document.documentElement.style.setProperty('--accent', '#10a37f');
+    document.querySelectorAll('.spark').forEach((e) => { e.textContent = '◎'; });
+  },
+  context(c) {
+    const chips = [];
+    if (c.loading) chips.push('<div class="chip"><div class="ph"></div><span>正在截取页面…</span></div>');
+    else if (c.noScreen) chips.push('<div class="chip warn" id="perm"><span>没有截到页面：lolPing 缺少“屏幕录制”权限，点此开启</span></div>');
+    else if (c.thumb) chips.push(`<div class="chip"><img src="${c.thumb}"><span>${esc(c.label || '页面截图')}</span></div>`);
+    if (c.selection) chips.push(`<div class="chip text"><span>选中 ${c.selection} 字</span></div>`);
+    if (c.url) chips.push(`<div class="chip text"><span>${esc(c.url.replace(/^https?:\/\//, ''))}</span></div>`);
+    $('chips').innerHTML = chips.join('');
+    if ($('perm')) $('perm').onclick = () => post({ type: 'screenSettings' });
+  },
+  focus() { $('input').focus(); },
+  status(text) { if (current) current.el.querySelector('.status span:last-child').textContent = text; },
+  delta(t) {
+    if (!current) return;
+    current.text += t; current.el.querySelector('.a').innerHTML = md(current.text);
+    const st = current.el.querySelector('.status'); if (st) st.style.display = 'none';
+    scrollDown();
+  },
+  done(errorText) {
+    running = false; $('spark').classList.remove('spin');
+    if (current) {
+      const st = current.el.querySelector('.status'); if (st) st.remove();
+      if (errorText) current.el.querySelector(".a").innerHTML = `<div class="err" style="white-space:pre-wrap">${esc(errorText)}</div>`;
+      if (current.text) { lastAnswer = current.text; $('copy').disabled = false; $('note').disabled = false; }
+    }
+    current = null; syncSend(); $('input').focus(); scrollDown();
+  },
+  toast,
+};
+post({ type: 'ready' });
+</script>
+</body>
+</html>
