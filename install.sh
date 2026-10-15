@@ -54,7 +54,7 @@ else
 fi
 
 # lolPing with AI pings, from the fork's release.
-if [ ! -d /Applications/lolPing.app ] || ! grep -q aiPingMap /Applications/lolPing.app/Contents/Resources/app.asar 2>/dev/null; then
+if [ ! -d /Applications/lolPing.app ] || ! strings /Applications/lolPing.app/Contents/Resources/app.asar 2>/dev/null | grep -q aiPingMap; then
   say "installing lolPing ($LOLPING_TAG)"
   tmp="$(mktemp -d)"
   curl -fL --progress-bar -o "$tmp/lolPing.dmg" \
