@@ -40,7 +40,9 @@ fi
 [ "$(uname -m)" = arm64 ] || die "needs an Apple Silicon Mac (lolPing's Mac build is arm64 only)"
 
 # Source: this clone, or a fresh download of the repo.
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || true)"
+# Piped from curl, BASH_SOURCE is empty: never mistake the current directory for a clone.
+HERE=''
+[ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ] && HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [ -n "$HERE" ] && [ -f "$HERE/bin/lolping-ai" ] && [ -f "$HERE/mac/LolpingAsk.swift" ]; then
   SRC="$HERE"
 else
